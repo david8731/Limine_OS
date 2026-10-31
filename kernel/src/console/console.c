@@ -121,12 +121,38 @@ bool console_is_ready(void) {
     return terminal_ready;
 }
 
+/*
+Writes text with given length to terminal, checks for correctness and adds '\r' to every '\n' to ensure correct curser placement with new line.
+If '\r' already is present, another one won't be added
+*/
 void console_write_n(const char *text, size_t length) {
     if (!terminal_ready || terminal_context == NULL || text == NULL || length == 0) {
         return;
     }
 
-    flanterm_write(terminal_context, text, length);
+    char buffer[128];
+    size_t used = 0;
+
+    for (size_t i = 0; i < length; i++) {
+        bool add_cr = text[i] == '\n' && (i == 0 || text[i - 1] != '\r');
+
+        size_t needed = add_cr ? 2 : 1;
+
+        if (used + needed > sizeof(buffer)) {
+            flanterm_write(terminal_context, buffer, used);
+            used = 0;
+        }
+
+        if (add_cr) {
+            buffer[used++] = '\r';
+        }
+
+        buffer[used++] = text[i];
+    }
+
+    if (used > 0) {
+        flanterm_write(terminal_context, buffer, used);
+    }
 }
 
 void console_write(const char *text) {

@@ -30,15 +30,13 @@ void kmain(void) {
         halt_forever();
     }
 
-    //console_write("\033[2J\033[H");
-    console_write("LimiTask /console - Flanterm framebuffer terminal\n");
+    console_write("\033[2J\033[H");
+    console_write("LimiTask terminal\n");
     console_write("==============================================\n");
     console_write("Kernel booted successfully.\n");
     console_write("\n");
 
-    // memory_info_print();
-
-    // console_write("\nTerminal output is ready. Keyboard input / command parsing is a separate next step.\n");
+    memory_info_print();
 
     halt_forever();
 }
