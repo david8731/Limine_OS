@@ -5,6 +5,10 @@
 #include "boot/limine_requests.h"
 #include "console/console.h"
 #include "memory/memory_info.h"
+#include "memory/pmm.h"
+#include "arch/arch.h"
+#include "shell/shell.h"
+#include "panic.h"
 
 static void halt_forever(void) {
     for (;;) {
@@ -38,5 +42,25 @@ void kmain(void) {
 
     memory_info_print();
 
-    halt_forever();
+    /* The PMM comes before the serial port: on aarch64 mapping the UART needs a page. */
+    if (!pmm_init()) {
+        panic("PMM konnte nicht eingerichtet werden");
+    }
+    console_write("\nPMM bereit: ");
+    console_write_u64(pmm_free_pages_count() * 4);
+    console_write(" KiB frei\n");
+
+    if (!serial_init()) {
+        console_write("Serielle Schnittstelle nicht gefunden, keine Eingabe moeglich\n");
+    }
+
+    arch_init();
+    arch_breakpoint();
+
+    if (!pmm_selftest()) {
+        panic("PMM-Selbsttest fehlgeschlagen");
+    }
+    console_write("PMM-Selbsttest ok\n");
+
+    shell_run();
 }
