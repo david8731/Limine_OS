@@ -18,19 +18,16 @@ static inline void *phys_to_virt(uint64_t phys) {
     return (void *)(phys + hhdm_offset);
 }
 
-/* Build the bitmap from the Limine memory map. Returns false if that fails. */
 bool pmm_init(void);
 
-/* PHYSICAL address of n contiguous free pages, 0 if there is no memory left. */
+/* PHYSICAL address of count free pages in a row, 0 if there is no memory left. */
 uint64_t pmm_alloc_pages(uint64_t count);
-uint64_t pmm_alloc(void);
 void pmm_free_pages(uint64_t phys, uint64_t count);
-void pmm_free(uint64_t phys);
+
+static inline uint64_t pmm_alloc(void) { return pmm_alloc_pages(1); }
+static inline void pmm_free(uint64_t phys) { pmm_free_pages(phys, 1); }
 
 uint64_t pmm_total_pages(void);
 uint64_t pmm_free_pages_count(void);
-
-/* Allocate, write, free and check the counters. Returns true if all is well. */
-bool pmm_selftest(void);
 
 #endif

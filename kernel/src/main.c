@@ -8,19 +8,10 @@
 #include "memory/pmm.h"
 #include "arch/arch.h"
 #include "shell/shell.h"
-#include "panic.h"
 
 static void halt_forever(void) {
     for (;;) {
-#if defined(__x86_64__)
-        __asm__ volatile ("hlt");
-#elif defined(__aarch64__) || defined(__riscv)
-        __asm__ volatile ("wfi");
-#elif defined(__loongarch64)
-        __asm__ volatile ("idle 0");
-#else
-        for (;;) { }
-#endif
+        __asm__ volatile ("wfi"); /* wait for interrupt: sleep until something happens */
     }
 }
 
@@ -42,25 +33,14 @@ void kmain(void) {
 
     memory_info_print();
 
-    /* The PMM comes before the serial port: on aarch64 mapping the UART needs a page. */
+    /* The PMM comes first: on aarch64 mapping the UART needs a page. */
     if (!pmm_init()) {
-        panic("PMM konnte nicht eingerichtet werden");
+        console_write("Fehler: PMM konnte nicht eingerichtet werden\n");
+        halt_forever();
     }
-    console_write("\nPMM bereit: ");
-    console_write_u64(pmm_free_pages_count() * 4);
-    console_write(" KiB frei\n");
-
     if (!serial_init()) {
         console_write("Serielle Schnittstelle nicht gefunden, keine Eingabe moeglich\n");
     }
-
-    arch_init();
-    arch_breakpoint();
-
-    if (!pmm_selftest()) {
-        panic("PMM-Selbsttest fehlgeschlagen");
-    }
-    console_write("PMM-Selbsttest ok\n");
 
     shell_run();
 }
