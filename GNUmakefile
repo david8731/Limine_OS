@@ -83,7 +83,8 @@ run: edk2-ovmf-bins $(IMAGE_NAME).iso
 		$(QEMU_MACHINE_FLAGS) \
 		$(QEMU_UEFI_FLAGS) \
 		-cdrom $(IMAGE_NAME).iso \
-		$(QEMUFLAGS)
+		$(QEMUFLAGS) \
+		-serial stdio
 
 .PHONY: run-hdd
 run-hdd: edk2-ovmf-bins $(IMAGE_NAME).hdd
