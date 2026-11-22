@@ -10,6 +10,9 @@
  * - every process has its own stack (pages from the PMM)
  * - cooperative: a process runs until it calls process_yield() itself
  * Process 0 is the shell, i.e. the code that called process_init().
+ * The shell gets a turn after every other process, whatever the scheduler,
+ * so that typing always works. The scheduler only decides which of the
+ * other processes runs next.
  */
 
 #define MAX_PROCESSES 16
@@ -22,6 +25,12 @@ enum process_state {
     PROCESS_FINISHED, /* its function returned, waits for kill */
 };
 
+enum scheduler {
+    SCHED_ROUND_ROBIN, /* everyone in turn */
+    SCHED_PRIORITY,    /* highest priority first, equal ones in turn */
+    SCHED_FIFO,        /* oldest process until it is finished */
+};
+
 struct process {
     int pid;
     char name[PROCESS_NAME_MAX];
@@ -30,18 +39,22 @@ struct process {
     uint64_t sp;          /* saved stack pointer while not running */
     uint64_t stack_phys;  /* stack pages from the PMM, 0 for the shell */
     uint64_t steps;       /* how often it got the CPU */
+    int priority;         /* only used by SCHED_PRIORITY, higher = first */
 };
 
 void process_init(void);
 
 /* Start a new process that runs entry(). Returns its pid, or -1 if that fails. */
-int process_create(const char *name, void (*entry)(void));
+int process_create(const char *name, void (*entry)(void), int priority);
 
 /* Give the CPU to the next ready process. Returns when it is our turn again. */
 void process_yield(void);
 
 /* Remove a process and free its stack. The shell (pid 0) cannot be killed. */
 bool process_kill(int pid);
+
+void process_set_scheduler(enum scheduler s);
+enum scheduler process_get_scheduler(void);
 
 /* Entry i of the process table, for ps. */
 const struct process *process_get(int i);

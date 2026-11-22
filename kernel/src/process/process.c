@@ -9,6 +9,8 @@
 static struct process table[MAX_PROCESSES];
 static struct process *current;
 static int next_pid;
+static enum scheduler scheduler = SCHED_ROUND_ROBIN;
+static int last_index; /* table index of the last non-shell process that ran */
 
 /*
  * switch_context(&old->sp, new->sp): save the registers the C compiler
@@ -66,7 +68,7 @@ void process_init(void) {
     current->state = PROCESS_RUNNING;
 }
 
-int process_create(const char *name, void (*entry)(void)) {
+int process_create(const char *name, void (*entry)(void), int priority) {
     struct process *p = NULL;
     for (int i = 0; i < MAX_PROCESSES && p == NULL; i++) {
         if (table[i].state == PROCESS_FREE) {
@@ -99,28 +101,81 @@ int process_create(const char *name, void (*entry)(void)) {
     p->sp = (uint64_t)frame;
     p->stack_phys = stack;
     p->steps = 0;
+    p->priority = priority;
     p->state = PROCESS_READY;
     return p->pid;
 }
 
-void process_yield(void) {
-    /* Round robin: the next READY entry after the current one. */
-    int me = (int)(current - table);
+/* Round robin: the next READY process after the one that ran last. */
+static struct process *pick_round_robin(void) {
     for (int k = 1; k <= MAX_PROCESSES; k++) {
-        struct process *next = &table[(me + k) % MAX_PROCESSES];
-        if (next->state != PROCESS_READY) {
-            continue;
+        int i = (last_index + k) % MAX_PROCESSES;
+        if (i != 0 && table[i].state == PROCESS_READY) {
+            return &table[i];
         }
-        struct process *old = current;
-        if (old->state == PROCESS_RUNNING) {
-            old->state = PROCESS_READY;
-        }
-        next->state = PROCESS_RUNNING;
-        next->steps++;
-        current = next;
-        switch_context(&old->sp, next->sp);
-        return; /* we got the CPU back */
     }
+    return NULL;
+}
+
+/* Priority: the READY process with the highest priority. */
+static struct process *pick_priority(void) {
+    struct process *best = NULL;
+    for (int k = 1; k <= MAX_PROCESSES; k++) {
+        int i = (last_index + k) % MAX_PROCESSES; /* equal ones in turn */
+        if (i != 0 && table[i].state == PROCESS_READY
+         && (best == NULL || table[i].priority > best->priority)) {
+            best = &table[i];
+        }
+    }
+    return best;
+}
+
+/* FIFO: the oldest READY process (smallest pid), until it is finished. */
+static struct process *pick_fifo(void) {
+    struct process *oldest = NULL;
+    for (int i = 1; i < MAX_PROCESSES; i++) {
+        if (table[i].state == PROCESS_READY
+         && (oldest == NULL || table[i].pid < oldest->pid)) {
+            oldest = &table[i];
+        }
+    }
+    return oldest;
+}
+
+void process_yield(void) {
+    struct process *next;
+    if (current != &table[0]) {
+        next = &table[0]; /* after every process the shell gets a turn */
+    } else if (scheduler == SCHED_PRIORITY) {
+        next = pick_priority();
+    } else if (scheduler == SCHED_FIFO) {
+        next = pick_fifo();
+    } else {
+        next = pick_round_robin();
+    }
+    if (next == NULL || next == current) {
+        return; /* nobody else wants the CPU */
+    }
+
+    struct process *old = current;
+    if (old->state == PROCESS_RUNNING) {
+        old->state = PROCESS_READY;
+    }
+    if (next != &table[0]) {
+        last_index = (int)(next - table);
+    }
+    next->state = PROCESS_RUNNING;
+    next->steps++;
+    current = next;
+    switch_context(&old->sp, next->sp);
+}
+
+void process_set_scheduler(enum scheduler s) {
+    scheduler = s;
+}
+
+enum scheduler process_get_scheduler(void) {
+    return scheduler;
 }
 
 bool process_kill(int pid) {

@@ -101,8 +101,18 @@ static const char *state_name(enum process_state state) {
     }
 }
 
+static const char *scheduler_name(enum scheduler s) {
+    switch (s) {
+        case SCHED_PRIORITY: return "Prioritaet";
+        case SCHED_FIFO:     return "FIFO";
+        default:             return "Round Robin";
+    }
+}
+
 static void command_ps(void) {
-    shell_write("PID  ZUSTAND  SCHRITTE  NAME\n");
+    shell_write("Scheduler: ");
+    shell_write(scheduler_name(process_get_scheduler()));
+    shell_write("\nPID  ZUSTAND  PRIO  SCHRITTE  NAME\n");
     for (int i = 0; i < MAX_PROCESSES; i++) {
         const struct process *p = process_get(i);
         if (p->state == PROCESS_FREE) {
@@ -111,13 +121,51 @@ static void command_ps(void) {
         shell_write_u64_padded((uint64_t)p->pid, 5);
         shell_write(state_name(p->state));
         shell_write("  ");
+        if (p->pid == 0) {
+            shell_write("-     ");
+        } else {
+            shell_write_u64_padded((uint64_t)p->priority, 6);
+        }
         shell_write_u64_padded(p->steps, 10);
         shell_write(p->name);
         shell_write("\n");
     }
 }
 
-static void command_start(const char *name) {
+/* Read a number from text. Returns -1 if text is not a number. */
+static int parse_number(const char *text) {
+    int value = 0;
+    if (*text == '\0') {
+        return -1;
+    }
+    for (; *text != '\0'; text++) {
+        if (*text < '0' || *text > '9' || value > 100000) {
+            return -1;
+        }
+        value = value * 10 + (*text - '0');
+    }
+    return value;
+}
+
+/* "start <name>" or "start <name> <priority>" */
+static void command_start(const char *arg) {
+    char name[PROCESS_NAME_MAX];
+    int len = 0;
+    while (arg[len] != '\0' && arg[len] != ' ' && len < PROCESS_NAME_MAX - 1) {
+        name[len] = arg[len];
+        len++;
+    }
+    name[len] = '\0';
+
+    int priority = 1;
+    if (arg[len] == ' ') {
+        priority = parse_number(&arg[len + 1]);
+        if (priority < 0) {
+            shell_write("Die Prioritaet muss eine Zahl sein, z. B. start summe 5\n");
+            return;
+        }
+    }
+
     void (*entry)(void) = NULL;
     if (str_equal(name, "endlos")) {
         entry = program_endless;
@@ -128,7 +176,7 @@ static void command_start(const char *name) {
         return;
     }
 
-    int pid = process_create(name, entry);
+    int pid = process_create(name, entry, priority);
     if (pid < 0) {
         shell_write("Kein Platz fuer einen neuen Prozess\n");
         return;
@@ -138,18 +186,27 @@ static void command_start(const char *name) {
     shell_write("\n");
 }
 
-static void command_kill(const char *arg) {
-    int pid = 0;
-    if (*arg == '\0') {
-        shell_write("Bitte eine PID angeben, z. B. kill 1\n");
+static void command_sched(const char *arg) {
+    if (str_equal(arg, "rr")) {
+        process_set_scheduler(SCHED_ROUND_ROBIN);
+    } else if (str_equal(arg, "prio")) {
+        process_set_scheduler(SCHED_PRIORITY);
+    } else if (str_equal(arg, "fifo")) {
+        process_set_scheduler(SCHED_FIFO);
+    } else if (*arg != '\0') {
+        shell_write("Moeglich: sched rr, sched prio, sched fifo\n");
         return;
     }
-    for (; *arg != '\0'; arg++) {
-        if (*arg < '0' || *arg > '9') {
-            shell_write("Das ist keine Zahl\n");
-            return;
-        }
-        pid = pid * 10 + (*arg - '0');
+    shell_write("Scheduler: ");
+    shell_write(scheduler_name(process_get_scheduler()));
+    shell_write("\n");
+}
+
+static void command_kill(const char *arg) {
+    int pid = parse_number(arg);
+    if (pid < 0) {
+        shell_write("Bitte eine PID angeben, z. B. kill 1\n");
+        return;
     }
     if (process_kill(pid)) {
         shell_write("Prozess beendet\n");
@@ -160,12 +217,13 @@ static void command_kill(const char *arg) {
 
 static void command_help(void) {
     shell_write("Befehle:\n");
-    shell_write("  help          diese Hilfe\n");
-    shell_write("  mem           Speicher laut PMM\n");
-    shell_write("  clear         Bildschirm leeren\n");
-    shell_write("  ps            alle Prozesse anzeigen\n");
-    shell_write("  start <name>  Prozess starten (endlos oder summe)\n");
-    shell_write("  kill <pid>    Prozess beenden\n");
+    shell_write("  help                  diese Hilfe\n");
+    shell_write("  mem                   Speicher laut PMM\n");
+    shell_write("  clear                 Bildschirm leeren\n");
+    shell_write("  ps                    alle Prozesse anzeigen\n");
+    shell_write("  start <name> [prio]   Prozess starten (endlos oder summe)\n");
+    shell_write("  sched [rr|prio|fifo]  Scheduler anzeigen oder wechseln\n");
+    shell_write("  kill <pid>            Prozess beenden\n");
 }
 
 static void command_mem(void) {
@@ -196,6 +254,10 @@ static void run_command(const char *line) {
         command_ps();
     } else if ((arg = after_prefix(line, "start ")) != NULL) {
         command_start(arg);
+    } else if (str_equal(line, "sched")) {
+        command_sched("");
+    } else if ((arg = after_prefix(line, "sched ")) != NULL) {
+        command_sched(arg);
     } else if ((arg = after_prefix(line, "kill ")) != NULL) {
         command_kill(arg);
     } else {
