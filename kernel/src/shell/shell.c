@@ -168,7 +168,34 @@ static void program_countdown(void) {
  */
 #define BAR_SLICE_MS 5
 #define BAR_SLICES_PER_STEP 60
+/* How far each bar is, by table slot. bar_pid says which process it was. */
+static int bar_step[MAX_PROCESSES];
+static int bar_pid[MAX_PROCESSES];
+
+/*
+ * True if this bar is the last of several running bars to reach step,
+ * i.e. a round is complete. Then a blank line separates the rounds.
+ */
+static bool bar_round_complete(void (*bar)(void), int slot, int step) {
+    int others = 0;
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        const struct process *p = process_get(i);
+        bool running = p->state == PROCESS_READY || p->state == PROCESS_RUNNING;
+        if (i != slot && running && p->entry == bar) {
+            int done = bar_pid[i] == p->pid ? bar_step[i] : 0; /* 0: not begun */
+            if (done < step) {
+                return false;
+            }
+            others++;
+        }
+    }
+    return others > 0;
+}
+
 static void program_bar(void) {
+    int slot = (int)(process_current() - process_get(0));
+    bar_pid[slot] = process_current()->pid;
+    bar_step[slot] = 0;
     for (int step = 1; step <= 10; step++) {
         for (int slice = 0; slice < BAR_SLICES_PER_STEP; slice++) {
             uint64_t until = timer_ms() + BAR_SLICE_MS;
@@ -184,6 +211,10 @@ static void program_bar(void) {
         shell_write(" ");
         shell_write_u64((uint64_t)step * 10);
         shell_write(" %\n");
+        bar_step[slot] = step;
+        if (bar_round_complete(program_bar, slot, step)) {
+            shell_write("\n");
+        }
     }
     write_done();
 }
