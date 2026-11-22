@@ -8,6 +8,7 @@
 #include "memory/pmm.h"
 #include "arch/arch.h"
 #include "shell/shell.h"
+#include "process/process.h"
 
 static void halt_forever(void) {
     for (;;) {
@@ -42,5 +43,6 @@ void kmain(void) {
         console_write("Serielle Schnittstelle nicht gefunden, keine Eingabe moeglich\n");
     }
 
+    process_init(); /* the shell becomes process 0 */
     shell_run();
 }

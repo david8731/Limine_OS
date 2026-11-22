@@ -7,6 +7,7 @@
 #include "arch/arch.h"
 #include "console/console.h"
 #include "memory/pmm.h"
+#include "process/process.h"
 
 #define LINE_MAX 128
 
@@ -32,6 +33,18 @@ static void shell_write_u64(uint64_t value) {
     shell_write(&buffer[pos]);
 }
 
+/* Number, then spaces until it is width characters wide (for tables). */
+static void shell_write_u64_padded(uint64_t value, int width) {
+    int digits = 1;
+    for (uint64_t v = value; v >= 10; v /= 10) {
+        digits++;
+    }
+    shell_write_u64(value);
+    for (; digits < width; digits++) {
+        shell_write(" ");
+    }
+}
+
 static bool str_equal(const char *a, const char *b) {
     while (*a != '\0' && *a == *b) {
         a++;
@@ -40,11 +53,108 @@ static bool str_equal(const char *a, const char *b) {
     return *a == *b;
 }
 
+/* If line starts with prefix, return the rest of the line, otherwise NULL. */
+static const char *after_prefix(const char *line, const char *prefix) {
+    while (*prefix != '\0') {
+        if (*line++ != *prefix++) {
+            return NULL;
+        }
+    }
+    return line;
+}
+
+/*
+ * Programs that "start" can run as a process. Each one does a little work
+ * and then calls process_yield(), so that the shell and the others get the
+ * CPU again. Without that the shell would hang.
+ */
+static void program_endless(void) {
+    for (;;) {
+        process_yield();
+    }
+}
+
+static void program_short(void) {
+    for (int i = 0; i < 1000; i++) {
+        process_yield();
+    }
+    /* returning ends the process, ps then shows "beendet" */
+}
+
+static const char *state_name(enum process_state state) {
+    switch (state) {
+        case PROCESS_READY:    return "bereit ";
+        case PROCESS_RUNNING:  return "laeuft ";
+        case PROCESS_FINISHED: return "beendet";
+        default:               return "?      ";
+    }
+}
+
+static void command_ps(void) {
+    shell_write("PID  ZUSTAND  SCHRITTE  NAME\n");
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        const struct process *p = process_get(i);
+        if (p->state == PROCESS_FREE) {
+            continue;
+        }
+        shell_write_u64_padded((uint64_t)p->pid, 5);
+        shell_write(state_name(p->state));
+        shell_write("  ");
+        shell_write_u64_padded(p->steps, 10);
+        shell_write(p->name);
+        shell_write("\n");
+    }
+}
+
+static void command_start(const char *name) {
+    void (*entry)(void) = NULL;
+    if (str_equal(name, "endlos")) {
+        entry = program_endless;
+    } else if (str_equal(name, "kurz")) {
+        entry = program_short;
+    } else {
+        shell_write("Unbekanntes Programm. Moeglich: endlos, kurz\n");
+        return;
+    }
+
+    int pid = process_create(name, entry);
+    if (pid < 0) {
+        shell_write("Kein Platz fuer einen neuen Prozess\n");
+        return;
+    }
+    shell_write("Gestartet mit PID ");
+    shell_write_u64((uint64_t)pid);
+    shell_write("\n");
+}
+
+static void command_kill(const char *arg) {
+    int pid = 0;
+    if (*arg == '\0') {
+        shell_write("Bitte eine PID angeben, z. B. kill 1\n");
+        return;
+    }
+    for (; *arg != '\0'; arg++) {
+        if (*arg < '0' || *arg > '9') {
+            shell_write("Das ist keine Zahl\n");
+            return;
+        }
+        pid = pid * 10 + (*arg - '0');
+    }
+    if (process_kill(pid)) {
+        shell_write("Prozess beendet\n");
+    } else {
+        shell_write("Keinen solchen Prozess gefunden (die Shell, PID 0, geht nicht)\n");
+    }
+}
+
 static void command_help(void) {
     shell_write("Befehle:\n");
     shell_write("  help   diese Hilfe\n");
     shell_write("  mem    Speicher laut PMM\n");
     shell_write("  clear  Bildschirm leeren\n");
+    shell_write("  ps            alle Prozesse anzeigen\n");
+    shell_write("  start <name>  Prozess starten (endlos oder kurz)\n");
+    shell_write("  kill <pid>    Prozess beenden\n");
 }
 
 static void command_mem(void) {
@@ -62,6 +172,7 @@ static void command_mem(void) {
 }
 
 static void run_command(const char *line) {
+    const char *arg;
     if (line[0] == '\0') {
         return;
     } else if (str_equal(line, "help")) {
@@ -70,6 +181,12 @@ static void run_command(const char *line) {
         command_mem();
     } else if (str_equal(line, "clear")) {
         console_write("\033[2J\033[H");
+    } else if (str_equal(line, "ps")) {
+        command_ps();
+    } else if ((arg = after_prefix(line, "start ")) != NULL) {
+        command_start(arg);
+    } else if ((arg = after_prefix(line, "kill ")) != NULL) {
+        command_kill(arg);
     } else {
         shell_write("Unbekannter Befehl: ");
         shell_write(line);
@@ -84,9 +201,10 @@ void shell_run(void) {
     shell_write("\nLimiTask Shell. Tippen im Terminal, in dem QEMU laeuft. 'help' fuer Befehle.\n> ");
 
     for (;;) {
-        /* No interrupts yet, so simply ask the serial port again and again. */
+        /* Nothing typed yet: let the other processes run meanwhile. */
         int c = serial_getc();
         if (c < 0) {
+            process_yield();
             continue;
         }
 
