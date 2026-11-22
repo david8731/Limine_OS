@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 
+#include "arch/arch.h"
 #include "memory/pmm.h"
 
 #define STACK_PAGES 4 /* 16 KiB stack per process */
@@ -71,12 +72,16 @@ void process_init(void) {
 int process_create(const char *name, void (*entry)(void), int priority) {
     struct process *p = NULL;
     for (int i = 0; i < MAX_PROCESSES && p == NULL; i++) {
-        if (table[i].state == PROCESS_FREE) {
+        if (table[i].state == PROCESS_FREE || table[i].state == PROCESS_FINISHED) {
             p = &table[i];
         }
     }
     if (p == NULL) {
         return -1;
+    }
+    if (p->state == PROCESS_FINISHED) {
+        pmm_free_pages(p->stack_phys, STACK_PAGES); /* reuse a finished slot */
+        p->state = PROCESS_FREE;
     }
 
     uint64_t stack = pmm_alloc_pages(STACK_PAGES);
@@ -102,6 +107,7 @@ int process_create(const char *name, void (*entry)(void), int priority) {
     p->stack_phys = stack;
     p->steps = 0;
     p->priority = priority;
+    p->start_ms = timer_ms();
     p->state = PROCESS_READY;
     return p->pid;
 }
@@ -188,6 +194,10 @@ bool process_kill(int pid) {
         }
     }
     return false;
+}
+
+const struct process *process_current(void) {
+    return current;
 }
 
 const struct process *process_get(int i) {

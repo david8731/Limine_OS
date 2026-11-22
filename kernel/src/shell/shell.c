@@ -92,6 +92,102 @@ static void program_sum(void) {
     shell_write("\n> ");
 }
 
+/* Prints "[name] " at the start of every line a program writes. */
+static void write_tag(void) {
+    shell_write("[");
+    shell_write(process_current()->name);
+    shell_write("] ");
+}
+
+/*
+ * Prints "fertig nach 3.4 s": the time since the process was started,
+ * including the time it waited for the CPU.
+ */
+static void write_done(void) {
+    uint64_t ms = timer_ms() - process_current()->start_ms;
+    write_tag();
+    shell_write("fertig nach ");
+    shell_write_u64(ms / 1000);
+    shell_write(".");
+    shell_write_u64((ms / 100) % 10);
+    shell_write(" s\n");
+}
+
+/*
+ * Counts the prime numbers up to 3000000 by trial division and reports
+ * every 10 %. It gives the CPU away after every 100 numbers it checks.
+ */
+#define PRIMES_LIMIT 3000000
+static void program_primes(void) {
+    uint64_t count = 0;
+    for (uint64_t n = 2; n <= PRIMES_LIMIT; n++) {
+        bool prime = true;
+        for (uint64_t d = 2; d * d <= n && prime; d++) {
+            prime = (n % d) != 0;
+        }
+        if (prime) {
+            count++;
+        }
+        if (n % (PRIMES_LIMIT / 10) == 0) {
+            write_tag();
+            shell_write_u64(n / (PRIMES_LIMIT / 100));
+            shell_write(" %, bisher ");
+            shell_write_u64(count);
+            shell_write(" Primzahlen\n");
+        }
+        if (n % 100 == 0) {
+            process_yield();
+        }
+    }
+    write_done();
+}
+
+/*
+ * Counts down from 10 to 0, one number per second (measured with the timer).
+ * While it waits it gives the CPU away, so it does not slow down the others,
+ * unless the scheduler keeps it on the CPU (FIFO, high priority).
+ */
+static void program_countdown(void) {
+    for (int i = 10; i >= 0; i--) {
+        write_tag();
+        shell_write_u64((uint64_t)i);
+        shell_write("\n");
+        uint64_t until = timer_ms() + 1000;
+        while (i > 0 && timer_ms() < until) {
+            process_yield();
+        }
+    }
+    write_done();
+}
+
+/*
+ * Draws a progress bar in 10 steps: "[A] ####...... 40 %".
+ * Every step needs 300 ms of CPU time, in slices of 5 ms: the process
+ * keeps the CPU busy for 5 ms, then gives it away. So a bar alone takes
+ * 3 s, and with several bars you can see in which order they get the CPU.
+ */
+#define BAR_SLICE_MS 5
+#define BAR_SLICES_PER_STEP 60
+static void program_bar(void) {
+    for (int step = 1; step <= 10; step++) {
+        for (int slice = 0; slice < BAR_SLICES_PER_STEP; slice++) {
+            uint64_t until = timer_ms() + BAR_SLICE_MS;
+            while (timer_ms() < until) {
+                /* busy: this is the "work" */
+            }
+            process_yield();
+        }
+        write_tag();
+        for (int i = 1; i <= 10; i++) {
+            shell_write(i <= step ? "#" : ".");
+        }
+        shell_write(" ");
+        shell_write_u64((uint64_t)step * 10);
+        shell_write(" %\n");
+    }
+    write_done();
+}
+
 static const char *state_name(enum process_state state) {
     switch (state) {
         case PROCESS_READY:    return "bereit ";
@@ -171,8 +267,14 @@ static void command_start(const char *arg) {
         entry = program_endless;
     } else if (str_equal(name, "summe")) {
         entry = program_sum;
+    } else if (str_equal(name, "primzahlen")) {
+        entry = program_primes;
+    } else if (str_equal(name, "countdown")) {
+        entry = program_countdown;
+    } else if (str_equal(name, "balken")) {
+        entry = program_bar;
     } else {
-        shell_write("Unbekanntes Programm. Moeglich: endlos, summe\n");
+        shell_write("Unbekanntes Programm. Moeglich: endlos, summe, primzahlen, countdown, balken\n");
         return;
     }
 
@@ -183,6 +285,20 @@ static void command_start(const char *arg) {
     }
     shell_write("Gestartet mit PID ");
     shell_write_u64((uint64_t)pid);
+    shell_write("\n");
+}
+
+/*
+ * Starts three progress bars A, B and C with priority 1, 2 and 3.
+ * Round Robin: they take turns. FIFO: A, then B, then C.
+ * Priority: C first, then B, then A. Choose the scheduler before the demo.
+ */
+static void command_demo(void) {
+    process_create("A", program_bar, 1);
+    process_create("B", program_bar, 2);
+    process_create("C", program_bar, 3);
+    shell_write("Balken A (Prio 1), B (Prio 2) und C (Prio 3) gestartet, Scheduler: ");
+    shell_write(scheduler_name(process_get_scheduler()));
     shell_write("\n");
 }
 
@@ -221,7 +337,9 @@ static void command_help(void) {
     shell_write("  mem                   Speicher laut PMM\n");
     shell_write("  clear                 Bildschirm leeren\n");
     shell_write("  ps                    alle Prozesse anzeigen\n");
-    shell_write("  start <name> [prio]   Prozess starten (endlos oder summe)\n");
+    shell_write("  start <name> [prio]   Prozess starten: endlos, summe, primzahlen,\n");
+    shell_write("                        countdown, balken\n");
+    shell_write("  demo                  drei Balken mit Prio 1, 2, 3 starten\n");
     shell_write("  sched [rr|prio|fifo]  Scheduler anzeigen oder wechseln\n");
     shell_write("  kill <pid>            Prozess beenden\n");
 }
@@ -254,6 +372,8 @@ static void run_command(const char *line) {
         command_ps();
     } else if ((arg = after_prefix(line, "start ")) != NULL) {
         command_start(arg);
+    } else if (str_equal(line, "demo")) {
+        command_demo();
     } else if (str_equal(line, "sched")) {
         command_sched("");
     } else if ((arg = after_prefix(line, "sched ")) != NULL) {

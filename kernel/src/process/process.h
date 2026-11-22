@@ -40,11 +40,15 @@ struct process {
     uint64_t stack_phys;  /* stack pages from the PMM, 0 for the shell */
     uint64_t steps;       /* how often it got the CPU */
     int priority;         /* only used by SCHED_PRIORITY, higher = first */
+    uint64_t start_ms;    /* when it was started (timer_ms) */
 };
 
 void process_init(void);
 
-/* Start a new process that runs entry(). Returns its pid, or -1 if that fails. */
+/*
+ * Start a new process that runs entry(). Returns its pid, or -1 if that fails.
+ * A finished process is cleaned up automatically when its slot is needed.
+ */
 int process_create(const char *name, void (*entry)(void), int priority);
 
 /* Give the CPU to the next ready process. Returns when it is our turn again. */
@@ -55,6 +59,9 @@ bool process_kill(int pid);
 
 void process_set_scheduler(enum scheduler s);
 enum scheduler process_get_scheduler(void);
+
+/* The process that is running right now. */
+const struct process *process_current(void);
 
 /* Entry i of the process table, for ps. */
 const struct process *process_get(int i);
