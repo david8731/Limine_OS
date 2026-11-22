@@ -8,7 +8,8 @@
  * Processes, as simple as possible:
  * - a fixed table of MAX_PROCESSES entries, no heap needed
  * - every process has its own stack (pages from the PMM)
- * - cooperative: a process runs until it calls process_yield() itself
+ * - preemptive: every TICK_MS ms the timer interrupt calls process_yield()
+ *   and takes the CPU away. A process may also give it away itself earlier.
  * Process 0 is the shell, i.e. the code that called process_init().
  * The shell gets a turn after every other process, whatever the scheduler,
  * so that typing always works. The scheduler only decides which of the
@@ -41,6 +42,8 @@ struct process {
     uint64_t steps;       /* how often it got the CPU */
     int priority;         /* only used by SCHED_PRIORITY, higher = first */
     uint64_t start_ms;    /* when it was started (timer_ms) */
+    uint64_t cpu_ms;      /* CPU time used so far, without the current turn */
+    uint64_t running_since; /* when its current turn began (timer_ms) */
 };
 
 void process_init(void);
@@ -51,7 +54,10 @@ void process_init(void);
  */
 int process_create(const char *name, void (*entry)(void), int priority);
 
-/* Give the CPU to the next ready process. Returns when it is our turn again. */
+/*
+ * Give the CPU to the next ready process. Returns when it is our turn again.
+ * The timer interrupt calls it, a process can also call it itself.
+ */
 void process_yield(void);
 
 /* Remove a process and free its stack. The shell (pid 0) cannot be killed. */
@@ -59,6 +65,9 @@ bool process_kill(int pid);
 
 void process_set_scheduler(enum scheduler s);
 enum scheduler process_get_scheduler(void);
+
+/* CPU time of the running process so far, including its current turn. */
+uint64_t process_cpu_ms(void);
 
 /* The process that is running right now. */
 const struct process *process_current(void);

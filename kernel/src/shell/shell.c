@@ -11,8 +11,13 @@
 
 #define LINE_MAX 128
 
-/* Write to the screen and to the serial port, so both show the same. */
+/*
+ * Write to the screen and to the serial port, so both show the same.
+ * Interrupts are off meanwhile: if the timer switched to another process
+ * in the middle and that one wrote too, the console would get mixed up.
+ */
 static void shell_write(const char *text) {
+    uint64_t irq_state = irq_disable();
     console_write(text);
     for (size_t i = 0; text[i] != '\0'; i++) {
         if (text[i] == '\n') {
@@ -20,6 +25,7 @@ static void shell_write(const char *text) {
         }
         serial_putc(text[i]);
     }
+    irq_restore(irq_state);
 }
 
 static void shell_write_u64(uint64_t value) {
@@ -64,32 +70,42 @@ static const char *after_prefix(const char *line, const char *prefix) {
 }
 
 /*
- * Programs that "start" can run as a process. Each one does a little work
- * and then calls process_yield(), so that the shell and the others get the
- * CPU again. Without that the shell would hang.
+ * Programs that "start" can run as a process. None of them gives the CPU
+ * away by itself: the timer interrupt takes it away every TICK_MS ms
+ * (preemptive), so the shell and the others still get their turn.
+ *
+ * A line of output consists of several shell_write() calls. So that no
+ * other process writes into the middle of it, interrupts are off for the
+ * whole line: line_begin() ... line_end().
  */
+static uint64_t line_begin(void) {
+    return irq_disable();
+}
+
+static void line_end(uint64_t irq_state) {
+    irq_restore(irq_state);
+}
+
+/* Runs forever and never gives the CPU away. Only the timer stops it. */
 static void program_endless(void) {
     for (;;) {
-        process_yield();
     }
 }
 
 /*
- * Example calculation: adds 1 + 2 + ... + 1000000. After every 1000 numbers
- * it gives the CPU away, so the shell stays usable while it calculates.
- * When it is done it prints the result and returns, which ends the process.
+ * Example calculation: adds 1 + 2 + ... + 1000000, then prints the result
+ * and returns, which ends the process.
  */
 static void program_sum(void) {
-    uint64_t sum = 0;
+    volatile uint64_t sum = 0; /* volatile: really add, do not precompute */
     for (uint64_t n = 1; n <= 1000000; n++) {
         sum += n;
-        if (n % 1000 == 0) {
-            process_yield();
-        }
     }
+    uint64_t line = line_begin();
     shell_write("\n[summe] 1 + 2 + ... + 1000000 = ");
     shell_write_u64(sum);
     shell_write("\n> ");
+    line_end(line);
 }
 
 /* Prints "[name] " at the start of every line a program writes. */
@@ -105,17 +121,21 @@ static void write_tag(void) {
  */
 static void write_done(void) {
     uint64_t ms = timer_ms() - process_current()->start_ms;
+    uint64_t line = line_begin();
     write_tag();
     shell_write("fertig nach ");
     shell_write_u64(ms / 1000);
     shell_write(".");
     shell_write_u64((ms / 100) % 10);
-    shell_write(" s\n");
+    shell_write(" s, davon ");
+    shell_write_u64(process_cpu_ms());
+    shell_write(" ms Rechenzeit\n");
+    line_end(line);
 }
 
 /*
  * Counts the prime numbers up to 3000000 by trial division and reports
- * every 10 %. It gives the CPU away after every 100 numbers it checks.
+ * every 10 %.
  */
 #define PRIMES_LIMIT 3000000
 static void program_primes(void) {
@@ -129,14 +149,13 @@ static void program_primes(void) {
             count++;
         }
         if (n % (PRIMES_LIMIT / 10) == 0) {
+            uint64_t line = line_begin();
             write_tag();
             shell_write_u64(n / (PRIMES_LIMIT / 100));
             shell_write(" %, bisher ");
             shell_write_u64(count);
             shell_write(" Primzahlen\n");
-        }
-        if (n % 100 == 0) {
-            process_yield();
+            line_end(line);
         }
     }
     write_done();
@@ -144,14 +163,17 @@ static void program_primes(void) {
 
 /*
  * Counts down from 10 to 0, one number per second (measured with the timer).
- * While it waits it gives the CPU away, so it does not slow down the others,
- * unless the scheduler keeps it on the CPU (FIFO, high priority).
+ * The only program that gives the CPU away itself: while it waits there is
+ * nothing to do, so it lets the others run instead of wasting its turn.
+ * (FIFO and a high priority keep choosing it anyway.)
  */
 static void program_countdown(void) {
     for (int i = 10; i >= 0; i--) {
+        uint64_t line = line_begin();
         write_tag();
         shell_write_u64((uint64_t)i);
         shell_write("\n");
+        line_end(line);
         uint64_t until = timer_ms() + 1000;
         while (i > 0 && timer_ms() < until) {
             process_yield();
@@ -162,12 +184,11 @@ static void program_countdown(void) {
 
 /*
  * Draws a progress bar in 10 steps: "[A] ####...... 40 %".
- * Every step needs 300 ms of CPU time, in slices of 5 ms: the process
- * keeps the CPU busy for 5 ms, then gives it away. So a bar alone takes
- * 3 s, and with several bars you can see in which order they get the CPU.
+ * Every step needs 300 ms of CPU time (counted by the kernel, see
+ * process_cpu_ms), so a bar alone takes 3 s. With several bars you can see
+ * in which order the scheduler gives them the CPU.
  */
-#define BAR_SLICE_MS 5
-#define BAR_SLICES_PER_STEP 60
+#define BAR_STEP_MS 300
 /* How far each bar is, by table slot. bar_pid says which process it was. */
 static int bar_step[MAX_PROCESSES];
 static int bar_pid[MAX_PROCESSES];
@@ -197,13 +218,10 @@ static void program_bar(void) {
     bar_pid[slot] = process_current()->pid;
     bar_step[slot] = 0;
     for (int step = 1; step <= 10; step++) {
-        for (int slice = 0; slice < BAR_SLICES_PER_STEP; slice++) {
-            uint64_t until = timer_ms() + BAR_SLICE_MS;
-            while (timer_ms() < until) {
-                /* busy: this is the "work" */
-            }
-            process_yield();
+        while (process_cpu_ms() < (uint64_t)step * BAR_STEP_MS) {
+            /* busy: this is the "work", until the timer interrupts us */
         }
+        uint64_t line = line_begin();
         write_tag();
         for (int i = 1; i <= 10; i++) {
             shell_write(i <= step ? "#" : ".");
@@ -215,6 +233,7 @@ static void program_bar(void) {
         if (bar_round_complete(program_bar, slot, step)) {
             shell_write("\n");
         }
+        line_end(line);
     }
     write_done();
 }
@@ -239,7 +258,7 @@ static const char *scheduler_name(enum scheduler s) {
 static void command_ps(void) {
     shell_write("Scheduler: ");
     shell_write(scheduler_name(process_get_scheduler()));
-    shell_write("\nPID  ZUSTAND  PRIO  SCHRITTE  NAME\n");
+    shell_write("\nPID  ZUSTAND  PRIO  SCHRITTE  CPU-MS    NAME\n");
     for (int i = 0; i < MAX_PROCESSES; i++) {
         const struct process *p = process_get(i);
         if (p->state == PROCESS_FREE) {
@@ -254,6 +273,7 @@ static void command_ps(void) {
             shell_write_u64_padded((uint64_t)p->priority, 6);
         }
         shell_write_u64_padded(p->steps, 10);
+        shell_write_u64_padded(p->cpu_ms, 10);
         shell_write(p->name);
         shell_write("\n");
     }

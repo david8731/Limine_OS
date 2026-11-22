@@ -43,8 +43,13 @@ __asm__ (
     "    ret\n"
 );
 
-/* Every new process starts here: run its function, then mark it finished. */
+/*
+ * Every new process starts here: run its function, then mark it finished.
+ * It may have been switched to from the timer interrupt, where interrupts
+ * are off, so switch them on first.
+ */
 static void process_start(void) {
+    irq_enable();
     current->entry();
     current->state = PROCESS_FINISHED;
     for (;;) {
@@ -67,9 +72,10 @@ void process_init(void) {
     current->pid = next_pid++;
     copy_name(current->name, "shell");
     current->state = PROCESS_RUNNING;
+    current->running_since = timer_ms();
 }
 
-int process_create(const char *name, void (*entry)(void), int priority) {
+static int create_locked(const char *name, void (*entry)(void), int priority) {
     struct process *p = NULL;
     for (int i = 0; i < MAX_PROCESSES && p == NULL; i++) {
         if (table[i].state == PROCESS_FREE || table[i].state == PROCESS_FINISHED) {
@@ -108,8 +114,17 @@ int process_create(const char *name, void (*entry)(void), int priority) {
     p->steps = 0;
     p->priority = priority;
     p->start_ms = timer_ms();
+    p->cpu_ms = 0;
     p->state = PROCESS_READY;
     return p->pid;
+}
+
+/* Interrupts off while the table changes, so the scheduler never sees a half-made entry. */
+int process_create(const char *name, void (*entry)(void), int priority) {
+    uint64_t irq_state = irq_disable();
+    int pid = create_locked(name, entry, priority);
+    irq_restore(irq_state);
+    return pid;
 }
 
 /* Round robin: the next READY process after the one that ran last. */
@@ -148,7 +163,14 @@ static struct process *pick_fifo(void) {
     return oldest;
 }
 
+/*
+ * Called by a process itself (cooperative) or by the timer interrupt
+ * (preemptive). Interrupts are off in here, so that a tick cannot come
+ * in the middle of the switch. irq_restore() at the end puts back the
+ * state that the process had when it got here.
+ */
 void process_yield(void) {
+    uint64_t irq_state = irq_disable();
     struct process *next;
     if (current != &table[0]) {
         next = &table[0]; /* after every process the shell gets a turn */
@@ -160,10 +182,14 @@ void process_yield(void) {
         next = pick_round_robin();
     }
     if (next == NULL || next == current) {
+        irq_restore(irq_state);
         return; /* nobody else wants the CPU */
     }
 
     struct process *old = current;
+    uint64_t now = timer_ms();
+    old->cpu_ms += now - old->running_since; /* CPU time, for ps */
+    next->running_since = now;
     if (old->state == PROCESS_RUNNING) {
         old->state = PROCESS_READY;
     }
@@ -174,6 +200,7 @@ void process_yield(void) {
     next->steps++;
     current = next;
     switch_context(&old->sp, next->sp);
+    irq_restore(irq_state); /* we are running again */
 }
 
 void process_set_scheduler(enum scheduler s) {
@@ -185,15 +212,22 @@ enum scheduler process_get_scheduler(void) {
 }
 
 bool process_kill(int pid) {
-    for (int i = 1; i < MAX_PROCESSES; i++) { /* i = 0 is the shell */
+    uint64_t irq_state = irq_disable();
+    bool found = false;
+    for (int i = 1; i < MAX_PROCESSES && !found; i++) { /* i = 0 is the shell */
         struct process *p = &table[i];
         if (p->state != PROCESS_FREE && p->pid == pid && p != current) {
             pmm_free_pages(p->stack_phys, STACK_PAGES);
             p->state = PROCESS_FREE;
-            return true;
+            found = true;
         }
     }
-    return false;
+    irq_restore(irq_state);
+    return found;
+}
+
+uint64_t process_cpu_ms(void) {
+    return current->cpu_ms + (timer_ms() - current->running_since);
 }
 
 const struct process *process_current(void) {

@@ -44,5 +44,8 @@ void kmain(void) {
     }
 
     process_init(); /* the shell becomes process 0 */
+    if (!interrupts_init()) { /* from here on the timer switches processes */
+        console_write("Interrupt-Controller nicht gefunden, kein Timer-Interrupt\n");
+    }
     shell_run();
 }
