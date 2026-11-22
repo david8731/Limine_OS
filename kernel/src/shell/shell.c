@@ -74,11 +74,22 @@ static void program_endless(void) {
     }
 }
 
-static void program_short(void) {
-    for (int i = 0; i < 1000; i++) {
-        process_yield();
+/*
+ * Example calculation: adds 1 + 2 + ... + 1000000. After every 1000 numbers
+ * it gives the CPU away, so the shell stays usable while it calculates.
+ * When it is done it prints the result and returns, which ends the process.
+ */
+static void program_sum(void) {
+    uint64_t sum = 0;
+    for (uint64_t n = 1; n <= 1000000; n++) {
+        sum += n;
+        if (n % 1000 == 0) {
+            process_yield();
+        }
     }
-    /* returning ends the process, ps then shows "beendet" */
+    shell_write("\n[summe] 1 + 2 + ... + 1000000 = ");
+    shell_write_u64(sum);
+    shell_write("\n> ");
 }
 
 static const char *state_name(enum process_state state) {
@@ -110,10 +121,10 @@ static void command_start(const char *name) {
     void (*entry)(void) = NULL;
     if (str_equal(name, "endlos")) {
         entry = program_endless;
-    } else if (str_equal(name, "kurz")) {
-        entry = program_short;
+    } else if (str_equal(name, "summe")) {
+        entry = program_sum;
     } else {
-        shell_write("Unbekanntes Programm. Moeglich: endlos, kurz\n");
+        shell_write("Unbekanntes Programm. Moeglich: endlos, summe\n");
         return;
     }
 
@@ -149,11 +160,11 @@ static void command_kill(const char *arg) {
 
 static void command_help(void) {
     shell_write("Befehle:\n");
-    shell_write("  help   diese Hilfe\n");
-    shell_write("  mem    Speicher laut PMM\n");
-    shell_write("  clear  Bildschirm leeren\n");
+    shell_write("  help          diese Hilfe\n");
+    shell_write("  mem           Speicher laut PMM\n");
+    shell_write("  clear         Bildschirm leeren\n");
     shell_write("  ps            alle Prozesse anzeigen\n");
-    shell_write("  start <name>  Prozess starten (endlos oder kurz)\n");
+    shell_write("  start <name>  Prozess starten (endlos oder summe)\n");
     shell_write("  kill <pid>    Prozess beenden\n");
 }
 
