@@ -226,8 +226,16 @@ bool process_kill(int pid) {
     return found;
 }
 
+/*
+ * Interrupts off: otherwise a tick could switch away and back between
+ * reading the clock and reading running_since. running_since would then be
+ * newer than the clock value, and the difference would wrap to a huge number.
+ */
 uint64_t process_cpu_ms(void) {
-    return current->cpu_ms + (timer_ms() - current->running_since);
+    uint64_t irq_state = irq_disable();
+    uint64_t ms = current->cpu_ms + (timer_ms() - current->running_since);
+    irq_restore(irq_state);
+    return ms;
 }
 
 const struct process *process_current(void) {

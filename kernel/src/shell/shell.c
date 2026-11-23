@@ -184,11 +184,10 @@ static void program_countdown(void) {
 
 /*
  * Draws a progress bar in 10 steps: "[A] ####...... 40 %".
- * Every step needs 300 ms of CPU time (counted by the kernel, see
- * process_cpu_ms), so a bar alone takes 3 s. With several bars you can see
- * in which order the scheduler gives them the CPU.
+ * Every step needs a tenth of total_ms CPU time (counted by the kernel, see
+ * process_cpu_ms), so a bar alone takes total_ms. With several bars you can
+ * see in which order the scheduler gives them the CPU.
  */
-#define BAR_STEP_MS 300
 /* How far each bar is, by table slot. bar_pid says which process it was. */
 static int bar_step[MAX_PROCESSES];
 static int bar_pid[MAX_PROCESSES];
@@ -197,14 +196,14 @@ static int bar_pid[MAX_PROCESSES];
  * True if this bar is the last of several running bars to reach step,
  * i.e. a round is complete. Then a blank line separates the rounds.
  */
-static bool bar_round_complete(void (*bar)(void), int slot, int step) {
+static bool bar_round_complete(int slot, int step) {
     int others = 0;
-    for (int i = 0; i < MAX_PROCESSES; i++) {
+    for (int i = 1; i < MAX_PROCESSES; i++) { /* 0 is the shell */
         const struct process *p = process_get(i);
         bool running = p->state == PROCESS_READY || p->state == PROCESS_RUNNING;
-        if (i != slot && running && p->entry == bar) {
-            int done = bar_pid[i] == p->pid ? bar_step[i] : 0; /* 0: not begun */
-            if (done < step) {
+        bool is_bar = bar_pid[i] == p->pid; /* a bar that has begun */
+        if (i != slot && running && is_bar) {
+            if (bar_step[i] < step) {
                 return false;
             }
             others++;
@@ -213,12 +212,12 @@ static bool bar_round_complete(void (*bar)(void), int slot, int step) {
     return others > 0;
 }
 
-static void program_bar(void) {
+static void run_bar(uint64_t total_ms) {
     int slot = (int)(process_current() - process_get(0));
     bar_pid[slot] = process_current()->pid;
     bar_step[slot] = 0;
     for (int step = 1; step <= 10; step++) {
-        while (process_cpu_ms() < (uint64_t)step * BAR_STEP_MS) {
+        while (process_cpu_ms() < step * total_ms / 10) {
             /* busy: this is the "work", until the timer interrupts us */
         }
         uint64_t line = line_begin();
@@ -230,13 +229,17 @@ static void program_bar(void) {
         shell_write_u64((uint64_t)step * 10);
         shell_write(" %\n");
         bar_step[slot] = step;
-        if (bar_round_complete(program_bar, slot, step)) {
+        if (bar_round_complete(slot, step)) {
             shell_write("\n");
         }
         line_end(line);
     }
     write_done();
 }
+
+static void program_bar(void)       { run_bar(3000); } /* balken, demo */
+static void program_bar_long(void)  { run_bar(6000); } /* demo2 */
+static void program_bar_short(void) { run_bar(1000); } /* demo2 */
 
 static const char *state_name(enum process_state state) {
     switch (state) {
@@ -353,6 +356,22 @@ static void command_demo(void) {
     shell_write("\n");
 }
 
+/*
+ * Three bars of different length, started longest first:
+ * lang 6 s (Prio 1), mittel 3 s (Prio 2), kurz 1 s (Prio 3).
+ * FIFO: the short one waits for the long one (convoy effect).
+ * Round Robin: the short one is done early without anyone knowing its length.
+ * Priority: shortest first ("Shortest Job First"), the fastest on average.
+ */
+static void command_demo2(void) {
+    process_create("lang", program_bar_long, 1);
+    process_create("mittel", program_bar, 2);
+    process_create("kurz", program_bar_short, 3);
+    shell_write("Balken lang 6 s (Prio 1), mittel 3 s (Prio 2), kurz 1 s (Prio 3) gestartet, Scheduler: ");
+    shell_write(scheduler_name(process_get_scheduler()));
+    shell_write("\n");
+}
+
 static void command_sched(const char *arg) {
     if (str_equal(arg, "rr")) {
         process_set_scheduler(SCHED_ROUND_ROBIN);
@@ -390,7 +409,8 @@ static void command_help(void) {
     shell_write("  ps                    alle Prozesse anzeigen\n");
     shell_write("  start <name> [prio]   Prozess starten: endlos, summe, primzahlen,\n");
     shell_write("                        countdown, balken\n");
-    shell_write("  demo                  drei Balken mit Prio 1, 2, 3 starten\n");
+    shell_write("  demo                  drei gleiche Balken mit Prio 1, 2, 3 starten\n");
+    shell_write("  demo2                 Balken lang, mittel, kurz mit Prio 1, 2, 3\n");
     shell_write("  sched [rr|prio|fifo]  Scheduler anzeigen oder wechseln\n");
     shell_write("  kill <pid>            Prozess beenden\n");
 }
@@ -425,6 +445,8 @@ static void run_command(const char *line) {
         command_start(arg);
     } else if (str_equal(line, "demo")) {
         command_demo();
+    } else if (str_equal(line, "demo2")) {
+        command_demo2();
     } else if (str_equal(line, "sched")) {
         command_sched("");
     } else if ((arg = after_prefix(line, "sched ")) != NULL) {
