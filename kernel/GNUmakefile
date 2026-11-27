@@ -8,14 +8,14 @@
 # Change as needed.
 override OUTPUT := kernel
 
-# Target architecture to build for. Default to x86_64.
-ARCH := x86_64
+# Target architecture to build for. Default to aarch64.
+ARCH := aarch64
 
 # Install prefix; /usr/local is a good, standard default pick.
 PREFIX := /usr/local
 
 # Check if the architecture is supported.
-ifeq ($(filter $(ARCH),aarch64 loongarch64 riscv64 x86_64),)
+ifeq ($(filter $(ARCH),aarch64 loongarch64 riscv64),)
     $(error Architecture $(ARCH) not supported)
 endif
 
@@ -46,10 +46,6 @@ CFLAGS := -g -O2 -pipe
 # User controllable C preprocessor flags. We set none by default.
 CPPFLAGS :=
 
-ifeq ($(ARCH),x86_64)
-    # User controllable nasm flags.
-    NASMFLAGS := -g
-endif
 
 # User controllable linker flags. We set none by default.
 LDFLAGS :=
@@ -120,13 +116,6 @@ override CPPFLAGS := \
     -MMD \
     -MP
 
-ifeq ($(ARCH),x86_64)
-    # Internal nasm flags that should not be changed by the user.
-    override NASMFLAGS := \
-        $(patsubst -g,-g -F dwarf,$(NASMFLAGS)) \
-        -i src/ \
-        -Wall
-endif
 
 # Always ask for a build ID, naming its style, as compilers and linkers
 # differ on both. Comes before LDFLAGS, which can override it.
@@ -154,20 +143,6 @@ override LDFLAGS += \
     -Wl,-T,linker-scripts/$(ARCH).lds
 
 # Architecture specific internal flags.
-ifeq ($(ARCH),x86_64)
-    override CFLAGS += \
-        -m64 \
-        -march=x86-64 \
-        -mno-mmx \
-        -mno-sse \
-        -mno-red-zone \
-        -mcmodel=kernel
-    override LDFLAGS += \
-        -Wl,-m,elf_x86_64
-    override NASMFLAGS := \
-        -f elf64 \
-        $(NASMFLAGS)
-endif
 ifeq ($(ARCH),aarch64)
     override CFLAGS += \
         -mcpu=generic \
@@ -267,18 +242,6 @@ ifeq ($(call CC_HAS_COMPILE_FLAG,-fno-stack-clash-protection),1)
 endif
 
 # Architecture specific checks.
-ifeq ($(ARCH),x86_64)
-    ifeq ($(call CC_HAS_COMPILE_FLAG,-fcf-protection=none),1)
-        override CFLAGS += \
-            -fcf-protection=none
-    endif
-    # GCC needs this flag for interrupt handlers and Clang below 3.9 has
-    # no name for it, where only a long double could reach the x87.
-    ifeq ($(call CC_HAS_COMPILE_FLAG,-mno-80387),1)
-        override CFLAGS += \
-            -mno-80387
-    endif
-endif
 ifeq ($(ARCH),aarch64)
     ifeq ($(call CC_HAS_COMPILE_FLAG,-mno-outline-atomics),1)
         override CFLAGS += \
@@ -402,11 +365,6 @@ override CFILES := $(filter %.c,$(SRCFILES))
 override ASFILES := $(filter %.S,$(SRCFILES))
 override OBJ := $(addprefix obj-$(ARCH)/,$(CFILES:.c=.c.o) $(ASFILES:.S=.S.o))
 override HEADER_DEPS := $(addprefix obj-$(ARCH)/,$(CFILES:.c=.c.d) $(ASFILES:.S=.S.d))
-ifeq ($(ARCH),x86_64)
-override NASMFILES := $(filter %.asm,$(SRCFILES))
-override OBJ += $(addprefix obj-$(ARCH)/,$(NASMFILES:.asm=.asm.o))
-override HEADER_DEPS += $(addprefix obj-$(ARCH)/,$(NASMFILES:.asm=.asm.d))
-endif
 
 # Default target. This must come first, before header dependencies.
 .PHONY: all
@@ -434,12 +392,6 @@ obj-$(ARCH)/%.S.o: %.S GNUmakefile
 	mkdir -p "$(dir $@)"
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
-ifeq ($(ARCH),x86_64)
-# Compilation rules for *.asm (nasm) files.
-obj-$(ARCH)/%.asm.o: %.asm GNUmakefile
-	mkdir -p "$(dir $@)"
-	nasm $(NASMFLAGS) -MD $(@:.o=.d) -MP $< -o $@
-endif
 
 # Remove object files and the final executable.
 .PHONY: clean

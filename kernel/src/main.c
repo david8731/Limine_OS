@@ -5,18 +5,14 @@
 #include "boot/limine_requests.h"
 #include "console/console.h"
 #include "memory/memory_info.h"
+#include "memory/pmm.h"
+#include "arch/arch.h"
+#include "shell/shell.h"
+#include "process/process.h"
 
 static void halt_forever(void) {
     for (;;) {
-#if defined(__x86_64__)
-        __asm__ volatile ("hlt");
-#elif defined(__aarch64__) || defined(__riscv)
-        __asm__ volatile ("wfi");
-#elif defined(__loongarch64)
-        __asm__ volatile ("idle 0");
-#else
-        for (;;) { }
-#endif
+        __asm__ volatile ("wfi"); /* wait for interrupt: sleep until something happens */
     }
 }
 
@@ -38,5 +34,18 @@ void kmain(void) {
 
     memory_info_print();
 
-    halt_forever();
+    /* The PMM comes first: on aarch64 mapping the UART needs a page. */
+    if (!pmm_init()) {
+        console_write("Fehler: PMM konnte nicht eingerichtet werden\n");
+        halt_forever();
+    }
+    if (!serial_init()) {
+        console_write("Serielle Schnittstelle nicht gefunden, keine Eingabe moeglich\n");
+    }
+
+    process_init(); /* the shell becomes process 0 */
+    if (!interrupts_init()) { /* from here on the timer switches processes */
+        console_write("Interrupt-Controller nicht gefunden, kein Timer-Interrupt\n");
+    }
+    shell_run();
 }

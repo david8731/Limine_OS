@@ -1,0 +1,247 @@
+#include "process.h"
+
+#include <stddef.h>
+
+#include "arch/arch.h"
+#include "memory/pmm.h"
+
+#define STACK_PAGES 4 /* 16 KiB stack per process */
+
+static struct process table[MAX_PROCESSES];
+static struct process *current;
+static int next_pid;
+static enum scheduler scheduler = SCHED_ROUND_ROBIN;
+static int last_index; /* table index of the last non-shell process that ran */
+
+/*
+ * switch_context(&old->sp, new->sp): save the registers the C compiler
+ * expects to survive a function call (x19-x30) on the old stack, remember
+ * the old stack pointer, switch to the new stack and load its registers.
+ * The final "ret" jumps to x30 of the new process, i.e. where it left off.
+ */
+void switch_context(uint64_t *old_sp, uint64_t new_sp);
+__asm__ (
+    ".global switch_context\n"
+    "switch_context:\n"
+    "    sub sp, sp, #96\n"
+    "    stp x19, x20, [sp, #0]\n"
+    "    stp x21, x22, [sp, #16]\n"
+    "    stp x23, x24, [sp, #32]\n"
+    "    stp x25, x26, [sp, #48]\n"
+    "    stp x27, x28, [sp, #64]\n"
+    "    stp x29, x30, [sp, #80]\n"
+    "    mov x9, sp\n"
+    "    str x9, [x0]\n"         /* *old_sp = sp */
+    "    mov sp, x1\n"           /* sp = new_sp */
+    "    ldp x19, x20, [sp, #0]\n"
+    "    ldp x21, x22, [sp, #16]\n"
+    "    ldp x23, x24, [sp, #32]\n"
+    "    ldp x25, x26, [sp, #48]\n"
+    "    ldp x27, x28, [sp, #64]\n"
+    "    ldp x29, x30, [sp, #80]\n"
+    "    add sp, sp, #96\n"
+    "    ret\n"
+);
+
+/*
+ * Every new process starts here: run its function, then mark it finished.
+ * It may have been switched to from the timer interrupt, where interrupts
+ * are off, so switch them on first.
+ */
+static void process_start(void) {
+    irq_enable();
+    current->entry();
+    current->state = PROCESS_FINISHED;
+    for (;;) {
+        process_yield(); /* never chosen again, waits to be killed */
+    }
+}
+
+static void copy_name(char *dst, const char *src) {
+    int i = 0;
+    while (src[i] != '\0' && i < PROCESS_NAME_MAX - 1) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+void process_init(void) {
+    /* The code running right now becomes process 0, the shell. */
+    current = &table[0];
+    current->pid = next_pid++;
+    copy_name(current->name, "shell");
+    current->state = PROCESS_RUNNING;
+    current->running_since = timer_ms();
+}
+
+static int create_locked(const char *name, void (*entry)(void), int priority) {
+    struct process *p = NULL;
+    for (int i = 0; i < MAX_PROCESSES && p == NULL; i++) {
+        if (table[i].state == PROCESS_FREE || table[i].state == PROCESS_FINISHED) {
+            p = &table[i];
+        }
+    }
+    if (p == NULL) {
+        return -1;
+    }
+    if (p->state == PROCESS_FINISHED) {
+        pmm_free_pages(p->stack_phys, STACK_PAGES); /* reuse a finished slot */
+        p->state = PROCESS_FREE;
+    }
+
+    uint64_t stack = pmm_alloc_pages(STACK_PAGES);
+    if (stack == 0) {
+        return -1;
+    }
+
+    /*
+     * Prepare the new stack so that switch_context can "return" into it:
+     * 12 saved registers, all 0, except x30 = process_start.
+     */
+    uint64_t *top = (uint64_t *)phys_to_virt(stack + STACK_PAGES * PAGE_SIZE);
+    uint64_t *frame = top - 12;
+    for (int i = 0; i < 12; i++) {
+        frame[i] = 0;
+    }
+    frame[11] = (uint64_t)process_start; /* x30, where "ret" jumps to */
+
+    p->pid = next_pid++;
+    copy_name(p->name, name);
+    p->entry = entry;
+    p->sp = (uint64_t)frame;
+    p->stack_phys = stack;
+    p->steps = 0;
+    p->priority = priority;
+    p->start_ms = timer_ms();
+    p->cpu_ms = 0;
+    p->state = PROCESS_READY;
+    return p->pid;
+}
+
+/* Interrupts off while the table changes, so the scheduler never sees a half-made entry. */
+int process_create(const char *name, void (*entry)(void), int priority) {
+    uint64_t irq_state = irq_disable();
+    int pid = create_locked(name, entry, priority);
+    irq_restore(irq_state);
+    return pid;
+}
+
+/* Round robin: the next READY process after the one that ran last. */
+static struct process *pick_round_robin(void) {
+    for (int k = 1; k <= MAX_PROCESSES; k++) {
+        int i = (last_index + k) % MAX_PROCESSES;
+        if (i != 0 && table[i].state == PROCESS_READY) {
+            return &table[i];
+        }
+    }
+    return NULL;
+}
+
+/* Priority: the READY process with the highest priority. */
+static struct process *pick_priority(void) {
+    struct process *best = NULL;
+    for (int k = 1; k <= MAX_PROCESSES; k++) {
+        int i = (last_index + k) % MAX_PROCESSES; /* equal ones in turn */
+        if (i != 0 && table[i].state == PROCESS_READY
+         && (best == NULL || table[i].priority > best->priority)) {
+            best = &table[i];
+        }
+    }
+    return best;
+}
+
+/* FIFO: the oldest READY process (smallest pid), until it is finished. */
+static struct process *pick_fifo(void) {
+    struct process *oldest = NULL;
+    for (int i = 1; i < MAX_PROCESSES; i++) {
+        if (table[i].state == PROCESS_READY
+         && (oldest == NULL || table[i].pid < oldest->pid)) {
+            oldest = &table[i];
+        }
+    }
+    return oldest;
+}
+
+/*
+ * Called by a process itself (cooperative) or by the timer interrupt
+ * (preemptive). Interrupts are off in here, so that a tick cannot come
+ * in the middle of the switch. irq_restore() at the end puts back the
+ * state that the process had when it got here.
+ */
+void process_yield(void) {
+    uint64_t irq_state = irq_disable();
+    struct process *next;
+    if (current != &table[0]) {
+        next = &table[0]; /* after every process the shell gets a turn */
+    } else if (scheduler == SCHED_PRIORITY) {
+        next = pick_priority();
+    } else if (scheduler == SCHED_FIFO) {
+        next = pick_fifo();
+    } else {
+        next = pick_round_robin();
+    }
+    if (next == NULL || next == current) {
+        irq_restore(irq_state);
+        return; /* nobody else wants the CPU */
+    }
+
+    struct process *old = current;
+    uint64_t now = timer_ms();
+    old->cpu_ms += now - old->running_since; /* CPU time, for ps */
+    next->running_since = now;
+    if (old->state == PROCESS_RUNNING) {
+        old->state = PROCESS_READY;
+    }
+    if (next != &table[0]) {
+        last_index = (int)(next - table);
+    }
+    next->state = PROCESS_RUNNING;
+    next->steps++;
+    current = next;
+    switch_context(&old->sp, next->sp);
+    irq_restore(irq_state); /* we are running again */
+}
+
+void process_set_scheduler(enum scheduler s) {
+    scheduler = s;
+}
+
+enum scheduler process_get_scheduler(void) {
+    return scheduler;
+}
+
+bool process_kill(int pid) {
+    uint64_t irq_state = irq_disable();
+    bool found = false;
+    for (int i = 1; i < MAX_PROCESSES && !found; i++) { /* i = 0 is the shell */
+        struct process *p = &table[i];
+        if (p->state != PROCESS_FREE && p->pid == pid && p != current) {
+            pmm_free_pages(p->stack_phys, STACK_PAGES);
+            p->state = PROCESS_FREE;
+            found = true;
+        }
+    }
+    irq_restore(irq_state);
+    return found;
+}
+
+/*
+ * Interrupts off: otherwise a tick could switch away and back between
+ * reading the clock and reading running_since. running_since would then be
+ * newer than the clock value, and the difference would wrap to a huge number.
+ */
+uint64_t process_cpu_ms(void) {
+    uint64_t irq_state = irq_disable();
+    uint64_t ms = current->cpu_ms + (timer_ms() - current->running_since);
+    irq_restore(irq_state);
+    return ms;
+}
+
+const struct process *process_current(void) {
+    return current;
+}
+
+const struct process *process_get(int i) {
+    return &table[i];
+}
